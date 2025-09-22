@@ -2113,11 +2113,7 @@ async moveToAudienceInAudioRoom(hostId: string, userId: string, roomId: string):
     
     // --- Agora Token ---
     async getAgoraToken(channelName: string, uid: string | number): Promise<string | null> {
-        // UID from components is already numeric. This ensures it's a clean integer.
         const numericUid = Math.floor(Number(uid));
-
-        // As requested by the user, call the token server directly.
-        // This bypasses the local proxy which might be failing in the execution environment.
         const tokenServerUrl = `https://agora-nine-swart.vercel.app/api/token?channelName=${channelName}&uid=${numericUid}`;
         
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -2125,10 +2121,11 @@ async moveToAudienceInAudioRoom(hostId: string, userId: string, roomId: string):
                 const response = await fetch(tokenServerUrl);
                 if (response.ok) {
                     const data = await response.json();
-                    if (data.token) {
-                        return data.token;
+                    // FIX: The token server returns the key as 'rtcToken', not 'token'.
+                    if (data.rtcToken) { 
+                        return data.rtcToken;
                     } else {
-                        console.error(`Attempt ${attempt}: Token server response OK, but no token in body`, data);
+                        console.error(`Attempt ${attempt}: Token server response OK, but no token in body with the expected key.`, data);
                     }
                 } else {
                      const errorText = await response.text();
