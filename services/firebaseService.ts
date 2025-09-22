@@ -2025,9 +2025,10 @@ async moveToAudienceInAudioRoom(hostId: string, userId: string, roomId: string):
             await db.runTransaction(async (transaction) => {
                 const groupDoc = await transaction.get(groupRef);
                 if (!groupDoc.exists) throw "Group not found";
-
+                
                 const groupData = groupDoc.data() as Group;
-                const updatedRequests = (groupData.joinRequests || []).filter(r => r.user.id !== userId);
+                const joinRequests = groupData.joinRequests || [];
+                const updatedRequests = joinRequests.filter(r => r.user.id !== userId);
 
                 transaction.update(groupRef, { joinRequests: updatedRequests });
             });
@@ -2038,144 +2039,109 @@ async moveToAudienceInAudioRoom(hostId: string, userId: string, roomId: string):
         }
     },
     async approvePost(postId: string): Promise<boolean> {
-        const postRef = db.collection('posts').doc(postId);
-        try {
-            await postRef.update({ status: 'approved' });
-            const postDoc = await postRef.get();
-            if (postDoc.exists && postDoc.data().groupId) {
-                const groupId = postDoc.data().groupId;
-                const groupRef = db.collection('groups').doc(groupId);
-                const groupDoc = await groupRef.get();
-                if (groupDoc.exists) {
-                    const groupData = groupDoc.data() as Group;
-                    const updatedPendingPosts = (groupData.pendingPosts || []).filter(p => p.id !== postId);
-                    await groupRef.update({ pendingPosts: updatedPendingPosts });
-                }
-            }
-            return true;
-        } catch (error) {
-            console.error(`Failed to approve post ${postId}:`, error);
-            return false;
-        }
+        await db.collection('posts').doc(postId).update({ status: 'approved' });
+        return true;
     },
     async rejectPost(postId: string): Promise<boolean> {
-        const postRef = db.collection('posts').doc(postId);
-        try {
-            const postDoc = await postRef.get();
-            if (postDoc.exists && postDoc.data().groupId) {
-                const groupId = postDoc.data().groupId;
-                const groupRef = db.collection('groups').doc(groupId);
-                const groupDoc = await groupRef.get();
-                if (groupDoc.exists) {
-                    const groupData = groupDoc.data() as Group;
-                    const updatedPendingPosts = (groupData.pendingPosts || []).filter(p => p.id !== postId);
-                    await groupRef.update({ pendingPosts: updatedPendingPosts });
-                }
-            }
-            await postRef.delete();
-            return true;
-        } catch (error) {
-            console.error(`Failed to reject/delete post ${postId}:`, error);
-            return false;
-        }
+        await db.collection('posts').doc(postId).delete(); // Or update status to 'rejected'
+        return true;
     },
+    async getInjectableAd(currentUser: User): Promise<Post | null> {
+        const q = db.collection('campaigns').where('status', '==', 'active').where('adType', '==', 'feed');
+        const snapshot = await q.get();
+        if (snapshot.empty) return null;
 
-    // --- Ads & Monetization ---
-    async getInjectableAd(user: User): Promise<Post | null> {
-        try {
-            const q = db.collection('campaigns').where('status', '==', 'active').where('adType', '==', 'feed');
-            const snapshot = await q.get();
-            if (snapshot.empty) return null;
-            
-            const allCampaigns = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Campaign));
-            const targetedCampaigns = allCampaigns.filter(c => matchesTargeting(c, user));
+        const allCampaigns = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Campaign));
+        const targetedCampaigns = allCampaigns.filter(c => matchesTargeting(c, currentUser));
+        if (targetedCampaigns.length === 0) return null;
 
-            if (targetedCampaigns.length === 0) return null;
+        const randomCampaign = targetedCampaigns[Math.floor(Math.random() * targetedCampaigns.length)];
+        const sponsorUser = await this.getUserProfileById(randomCampaign.sponsorId);
+        if (!sponsorUser) return null;
 
-            const adCampaign = targetedCampaigns[Math.floor(Math.random() * targetedCampaigns.length)];
-            const sponsor = await this.getUserProfileById(adCampaign.sponsorId);
-            if (!sponsor) return null;
-
-            return {
-                id: `ad_${adCampaign.id}`,
-                author: { id: sponsor.id, name: sponsor.name, username: sponsor.username, avatarUrl: sponsor.avatarUrl },
-                caption: adCampaign.caption,
-                createdAt: new Date().toISOString(),
-                commentCount: 0,
-                comments: [],
-                reactions: {},
-                imageUrl: adCampaign.imageUrl,
-                videoUrl: adCampaign.videoUrl,
-                audioUrl: adCampaign.audioUrl,
-                isSponsored: true,
-                sponsorName: adCampaign.sponsorName,
-                campaignId: adCampaign.id,
-                websiteUrl: adCampaign.websiteUrl,
-                allowDirectMessage: adCampaign.allowDirectMessage,
-                allowLeadForm: adCampaign.allowLeadForm,
-                sponsorId: adCampaign.sponsorId,
-                duration: 0,
-            } as Post;
-        } catch (error) {
-            console.error("Error getting injectable ad:", error);
-            return null;
-        }
+        return {
+            id: `ad_${randomCampaign.id}`,
+            author: { id: sponsorUser.id, name: sponsorUser.name, username: sponsorUser.username, avatarUrl: sponsorUser.avatarUrl },
+            caption: randomCampaign.caption,
+            createdAt: new Date().toISOString(),
+            imageUrl: randomCampaign.imageUrl,
+            videoUrl: randomCampaign.videoUrl,
+            audioUrl: randomCampaign.audioUrl,
+            isSponsored: true,
+            sponsorName: randomCampaign.sponsorName,
+            campaignId: randomCampaign.id,
+            websiteUrl: randomCampaign.websiteUrl,
+            allowDirectMessage: randomCampaign.allowDirectMessage,
+            allowLeadForm: randomCampaign.allowLeadForm,
+            sponsorId: randomCampaign.sponsorId,
+            duration: 0,
+            commentCount: 0,
+            comments: [],
+        };
     },
+    async getInjectableStoryAd(currentUser: User): Promise<Story | null> {
+        const q = db.collection('campaigns').where('status', '==', 'active').where('adType', '==', 'story');
+        const snapshot = await q.get();
+        if (snapshot.empty) return null;
 
-    async getInjectableStoryAd(user: User): Promise<Story | null> {
-        try {
-            const q = db.collection('campaigns').where('status', '==', 'active').where('adType', '==', 'story');
-            const snapshot = await q.get();
-            if (snapshot.empty) return null;
+        const allCampaigns = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Campaign));
+        const targetedCampaigns = allCampaigns.filter(c => matchesTargeting(c, currentUser));
+        if (targetedCampaigns.length === 0) return null;
 
-            const allCampaigns = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Campaign));
-            const targetedCampaigns = allCampaigns.filter(c => matchesTargeting(c, user));
+        const randomCampaign = targetedCampaigns[Math.floor(Math.random() * targetedCampaigns.length)];
+        const sponsorUser = await this.getUserProfileById(randomCampaign.sponsorId);
+        if (!sponsorUser) return null;
 
-            if (targetedCampaigns.length === 0) return null;
+        const storyType = randomCampaign.videoUrl ? 'video' : 'image';
 
-            const adCampaign = targetedCampaigns[Math.floor(Math.random() * targetedCampaigns.length)];
-            const sponsor = await this.getUserProfileById(adCampaign.sponsorId);
-            if (!sponsor) return null;
-
-            return {
-                id: `ad_${adCampaign.id}`,
-                author: { id: sponsor.id, name: sponsor.name, username: sponsor.username, avatarUrl: sponsor.avatarUrl },
-                createdAt: new Date().toISOString(),
-                type: adCampaign.videoUrl ? 'video' : 'image',
-                contentUrl: adCampaign.videoUrl || adCampaign.imageUrl,
-                duration: 15, // Story ads are typically short
-                viewedBy: [],
-                privacy: 'public',
-                isSponsored: true,
-                sponsorName: adCampaign.sponsorName,
-                sponsorAvatar: sponsor.avatarUrl,
-                campaignId: adCampaign.id,
-                ctaLink: adCampaign.websiteUrl,
-            } as Story;
-        } catch (error) {
-            console.error("Error getting injectable story ad:", error);
-            return null;
-        }
+        return {
+            id: `ad_story_${randomCampaign.id}`,
+            author: { id: sponsorUser.id, name: sponsorUser.name, username: sponsorUser.username, avatarUrl: sponsorUser.avatarUrl },
+            createdAt: new Date().toISOString(),
+            type: storyType,
+            contentUrl: randomCampaign.videoUrl || randomCampaign.imageUrl,
+            duration: 15,
+            viewedBy: [],
+            privacy: 'public',
+            isSponsored: true,
+            sponsorName: randomCampaign.sponsorName,
+            sponsorAvatar: sponsorUser.avatarUrl,
+            campaignId: randomCampaign.id,
+            ctaLink: randomCampaign.websiteUrl,
+        };
     },
+    
+    // --- Agora Token ---
     async getAgoraToken(channelName: string, uid: string | number): Promise<string | null> {
-        // This function now calls the local proxy server to avoid CORS issues.
-        const TOKEN_SERVER_URL = '/api/proxy'; 
+        // This function now expects the UID to be a string or number. We will ensure it's a number.
+        let numericUid: number;
+        if (typeof uid === 'string') {
+            // A simple, deterministic hash to convert string UID to a number for Agora.
+            // This prevents the upstream server from crashing on a string UID.
+            let hash = 0;
+            for (let i = 0; i < uid.length; i++) {
+                const char = uid.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash; // Convert to 32bit integer
+            }
+            numericUid = Math.abs(hash);
+        } else {
+            numericUid = uid;
+        }
 
+        const proxyUrl = `/api/proxy?channelName=${channelName}&uid=${numericUid}`;
         try {
-            const response = await fetch(`${TOKEN_SERVER_URL}?channelName=${channelName}&uid=${uid}`);
+            const response = await fetch(proxyUrl);
             if (!response.ok) {
-                const errorText = await response.text();
-                console.error('Failed to fetch Agora token from proxy:', errorText);
+                const errorData = await response.json();
+                console.error("Failed to fetch Agora token from proxy:", errorData);
                 throw new Error(`Token proxy server responded with ${response.status}`);
             }
             const data = await response.json();
-            if (!data.rtcToken) {
-                throw new Error('rtcToken key not found in server response');
-            }
-            return data.rtcToken;
+            return data.token;
         } catch (error) {
             console.error("Could not fetch Agora token. Please ensure your token server is deployed and the URL is correct.", error);
-            return null; // Return null on failure, which will prevent joining the call.
+            return null;
         }
     },
 };
