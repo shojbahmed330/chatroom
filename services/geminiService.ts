@@ -542,5 +542,5 @@ export const geminiService = {
     listenToCall: (callId, callback) => firebaseService.listenToCall(callId, callback),
     updateCallStatus: (callId, status) => firebaseService.updateCallStatus(callId, status),
 
-    getAgoraToken: (channelName: string, uid: string | number) => firebaseService.getAgoraToken(channelName, uid),
+    getAgoraToken: (channelName: string, uid: number) => firebaseService.getAgoraToken(channelName, uid),
 };

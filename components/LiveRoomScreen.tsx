@@ -130,12 +130,13 @@ const LiveRoomScreen: React.FC<LiveRoomScreenProps> = ({ currentUser, roomId, on
                 client.enableAudioVolumeIndicator();
                 client.on('volume-indicator', handleVolumeIndicator);
                 
-                const token = await geminiService.getAgoraToken(roomId, currentUser.id);
+                const uid = parseInt(currentUser.id, 36) % 10000000;
+                const token = await geminiService.getAgoraToken(roomId, uid);
                 if (!token) {
                     throw new Error("Failed to get Agora token. Please try again.");
                 }
 
-                await client.join(AGORA_APP_ID, roomId, token, currentUser.id);
+                await client.join(AGORA_APP_ID, roomId, token, uid);
 
                 localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack();
                 await client.publish([localAudioTrack.current]);
