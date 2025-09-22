@@ -1,0 +1,8 @@
+{
+  "name": "Working love- 4nd Backup voice post- Voicebook-Room voice Done- befor Story, Audio and video call completed",
+  "description": "A fully voice-controlled social media application where you can sign up, log in, navigate your feed, post audio, comment, and more, all using your voice. This implementation simulates the voice experience through a text-based command interface powered by the Gemini API.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
