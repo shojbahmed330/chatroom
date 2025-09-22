@@ -2113,16 +2113,13 @@ async moveToAudienceInAudioRoom(hostId: string, userId: string, roomId: string):
     
     // --- Agora Token ---
     async getAgoraToken(channelName: string, uid: string | number): Promise<string | null> {
-        // This function now expects the UID to be a string or number. We will ensure it's a number.
         let numericUid: number;
         if (typeof uid === 'string') {
-            // A simple, deterministic hash to convert string UID to a number for Agora.
-            // This prevents the upstream server from crashing on a string UID.
             let hash = 0;
             for (let i = 0; i < uid.length; i++) {
                 const char = uid.charCodeAt(i);
                 hash = ((hash << 5) - hash) + char;
-                hash = hash & hash; // Convert to 32bit integer
+                hash = hash & hash;
             }
             numericUid = Math.abs(hash);
         } else {
@@ -2130,18 +2127,26 @@ async moveToAudienceInAudioRoom(hostId: string, userId: string, roomId: string):
         }
 
         const proxyUrl = `/api/proxy?channelName=${channelName}&uid=${numericUid}`;
-        try {
-            const response = await fetch(proxyUrl);
-            if (!response.ok) {
-                const errorData = await response.json();
-                console.error("Failed to fetch Agora token from proxy:", errorData);
-                throw new Error(`Token proxy server responded with ${response.status}`);
+        
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const response = await fetch(proxyUrl);
+                if (response.ok) {
+                    const data = await response.json();
+                    return data.token;
+                }
+                 const errorData = await response.json().catch(() => ({ error: "Failed to parse error response" }));
+                 console.error(`Attempt ${attempt}: Failed to fetch Agora token from proxy:`, errorData);
+
+            } catch (error) {
+                console.error(`Attempt ${attempt}: Network error fetching Agora token.`, error);
             }
-            const data = await response.json();
-            return data.token;
-        } catch (error) {
-            console.error("Could not fetch Agora token. Please ensure your token server is deployed and the URL is correct.", error);
-            return null;
+            if (attempt < 3) {
+                 await new Promise(res => setTimeout(res, 500)); // Wait 500ms before retrying
+            }
         }
+        
+        console.error("Could not fetch Agora token after 3 attempts.");
+        return null;
     },
 };

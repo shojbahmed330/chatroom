@@ -92,6 +92,7 @@ const LiveVideoRoomScreen: React.FC<LiveVideoRoomScreenProps> = ({ currentUser, 
     const [isMuted, setIsMuted] = useState(false);
     const [isCameraOff, setIsCameraOff] = useState(false);
     const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
+    const [connectionError, setConnectionError] = useState<string | null>(null);
 
     const agoraClient = useRef<IAgoraRTCClient | null>(null);
     const localAudioTrack = useRef<IMicrophoneAudioTrack | null>(null);
@@ -150,7 +151,7 @@ const LiveVideoRoomScreen: React.FC<LiveVideoRoomScreenProps> = ({ currentUser, 
 
                 const token = await geminiService.getAgoraToken(roomId, currentUser.id);
                 if (!token) {
-                    throw new Error("Failed to retrieve Agora token. The video call cannot proceed.");
+                    throw new Error("Failed to get Agora token. Please try again.");
                 }
                 await client.join(AGORA_APP_ID, roomId, token, currentUser.id);
 
@@ -162,14 +163,15 @@ const LiveVideoRoomScreen: React.FC<LiveVideoRoomScreenProps> = ({ currentUser, 
                 await client.publish([audioTrack, videoTrack]);
             } catch (error: any) {
                 console.error("Agora failed to join or publish:", error);
+                 const errorMessage = error.message || 'An unknown error occurred.';
+                setConnectionError(`Could not join the room: ${errorMessage}`);
                 if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError' || error.code === 'DEVICE_NOT_FOUND') {
                     onSetTtsMessage("Could not find a microphone or camera. Please check your devices and permissions.");
                 } else if (error.name === 'NotAllowedError' || error.code === 'PERMISSION_DENIED') {
                     onSetTtsMessage("Microphone/camera access was denied. Please allow access in your browser settings.");
                 } else {
-                    onSetTtsMessage(`Could not start the video room: ${error.message || 'Unknown error'}`);
+                    onSetTtsMessage(`Could not start the video room: ${errorMessage}`);
                 }
-                onGoBack();
             }
         };
 
@@ -230,6 +232,19 @@ const LiveVideoRoomScreen: React.FC<LiveVideoRoomScreenProps> = ({ currentUser, 
     
     if (isLoading || !room) {
         return <div className="h-full w-full flex items-center justify-center bg-slate-900 text-white">Loading Video Room...</div>;
+    }
+
+     if (connectionError) {
+        return (
+            <div className="h-full w-full flex flex-col items-center justify-center bg-slate-900 text-white p-4">
+                <Icon name="close" className="w-16 h-16 text-red-500 mb-4" />
+                <h2 className="text-2xl font-bold">Connection Failed</h2>
+                <p className="text-slate-400 mt-2 text-center">{connectionError}</p>
+                <button onClick={onGoBack} className="mt-6 bg-slate-700 hover:bg-slate-600 font-bold py-2 px-6 rounded-lg">
+                    Go Back
+                </button>
+            </div>
+        );
     }
     
     const allParticipants = [

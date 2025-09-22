@@ -94,6 +94,7 @@ const LiveRoomScreen: React.FC<LiveRoomScreenProps> = ({ currentUser, roomId, on
     const [messages, setMessages] = useState<LiveAudioRoomMessage[]>([]);
     const [newMessage, setNewMessage] = useState('');
     const [isChatOpen, setIsChatOpen] = useState(false);
+    const [connectionError, setConnectionError] = useState<string | null>(null);
 
     const agoraClient = useRef<IAgoraRTCClient | null>(null);
     const localAudioTrack = useRef<IMicrophoneAudioTrack | null>(null);
@@ -130,20 +131,22 @@ const LiveRoomScreen: React.FC<LiveRoomScreenProps> = ({ currentUser, roomId, on
                 client.on('volume-indicator', handleVolumeIndicator);
                 
                 const token = await geminiService.getAgoraToken(roomId, currentUser.id);
-                if (!token) throw new Error("Failed to get Agora token.");
+                if (!token) {
+                    throw new Error("Failed to get Agora token. Please try again.");
+                }
 
                 await client.join(AGORA_APP_ID, roomId, token, currentUser.id);
 
                 localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack();
                 await client.publish([localAudioTrack.current]);
 
-                // Always join muted initially. Another effect will unmute if the user is a speaker.
                 await localAudioTrack.current.setMuted(true);
                 setIsMuted(true);
             } catch (error: any) {
                 console.error("Agora join/publish error:", error);
-                onSetTtsMessage(`Could not join the room: ${error.message || 'Unknown error'}`);
-                onGoBack();
+                const errorMessage = error.message || 'An unknown error occurred.';
+                setConnectionError(`Could not join the room: ${errorMessage}`);
+                onSetTtsMessage(`Could not join the room: ${errorMessage}`);
             }
         };
 
@@ -227,6 +230,19 @@ const LiveRoomScreen: React.FC<LiveRoomScreenProps> = ({ currentUser, roomId, on
 
     if (isLoading || !room) {
         return <div className="h-full w-full flex items-center justify-center bg-slate-900 text-white">Loading Room...</div>;
+    }
+
+    if (connectionError) {
+        return (
+            <div className="h-full w-full flex flex-col items-center justify-center bg-slate-900 text-white p-4">
+                <Icon name="close" className="w-16 h-16 text-red-500 mb-4" />
+                <h2 className="text-2xl font-bold">Connection Failed</h2>
+                <p className="text-slate-400 mt-2 text-center">{connectionError}</p>
+                <button onClick={onGoBack} className="mt-6 bg-slate-700 hover:bg-slate-600 font-bold py-2 px-6 rounded-lg">
+                    Go Back
+                </button>
+            </div>
+        );
     }
     
     const hasRaisedHand = room.raisedHands.includes(currentUser.id);
