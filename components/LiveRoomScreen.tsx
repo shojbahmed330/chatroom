@@ -1,259 +1,268 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { AppView, LiveAudioRoom, User, LiveAudioRoomMessage } from '../types';
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { LiveAudioRoom, User, AppView, LiveAudioRoomMessage } from '../types';
 import { geminiService } from '../services/geminiService';
 import Icon from './Icon';
-
-const EMOJI_LIST = [
-  '❤️', '😂', '👍', '😢', '😡', '🔥', '😊', '😮', '👏', '🎉'
-];
-
-const EMOJI_REGEX = /(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g;
-const isJumboEmoji = (text: string | undefined): boolean => {
-    if (!text) return false;
-    const trimmedText = text.trim();
-    const noEmojiText = trimmedText.replace(EMOJI_REGEX, '');
-    if (noEmojiText.trim().length > 0) return false; 
-
-    const graphemes = Array.from(trimmedText);
-    return graphemes.length > 0 && graphemes.length <= 2;
-};
-
+import { AGORA_APP_ID } from '../constants';
+import AgoraRTC from 'agora-rtc-sdk-ng';
+import type { IAgoraRTCClient, IAgoraRTCRemoteUser, IMicrophoneAudioTrack } from 'agora-rtc-sdk-ng';
+import { useSettings } from '../contexts/SettingsContext';
 
 interface LiveRoomScreenProps {
   currentUser: User;
   roomId: string;
-  onNavigate: (view: AppView, props?: any) => void;
   onGoBack: () => void;
   onSetTtsMessage: (message: string) => void;
+  onOpenProfile: (username: string) => void;
 }
 
-const Avatar: React.FC<{ user: User; isHost?: boolean; isSpeaking?: boolean; children?: React.ReactNode, specialIcon?: 'shield' | 'lock' | 'megaphone' | 'mute' }> = ({ user, isHost, isSpeaking, children, specialIcon }) => (
-    <div className="relative flex flex-col items-center gap-1 text-center w-20">
-        <div className="relative">
-            <img 
-                src={user.avatarUrl}
-                alt={user.name}
-                className={`w-16 h-16 rounded-full border-2 transition-all duration-300 ${isSpeaking ? 'speaking-glow border-blue-400' : 'border-slate-600'}`}
-            />
+const ParticipantCard: React.FC<{
+    participant: User;
+    isHost: boolean;
+    isMuted: boolean;
+    isSpeaking: boolean;
+    onClick: () => void;
+}> = ({ participant, isHost, isMuted, isSpeaking, onClick }) => (
+    <div className="flex flex-col items-center text-center relative" onClick={onClick}>
+        <div className={`relative rounded-full p-1 transition-all duration-300 ${isSpeaking ? 'bg-green-500/50' : 'bg-transparent'}`}>
+            <img src={participant.avatarUrl} alt={participant.name} className="w-20 h-20 rounded-full" />
+            {isMuted && (
+                <div className="absolute -bottom-1 -right-1 bg-slate-700 p-1.5 rounded-full border-2 border-slate-900">
+                    <Icon name="microphone-slash" className="w-4 h-4 text-white" />
+                </div>
+            )}
         </div>
-        <div className="flex items-center gap-1">
-             {isHost && <span title="Host">👑</span>}
-            <p className="font-semibold text-slate-200 text-xs truncate w-16">{user.name}</p>
-        </div>
-        {children}
-    </div>
-);
-
-const HeartAnimation = () => (
-    <div className="heart-animation-container">
-        {Array.from({ length: 15 }).map((_, i) => (
-            <div
-                key={i}
-                className="heart"
-                style={{
-                    left: `${Math.random() * 90 + 5}%`,
-                    animationDelay: `${Math.random() * 2}s`,
-                    fontSize: `${Math.random() * 1.5 + 1.5}rem`,
-                }}
-            >
-                ❤️
-            </div>
-        ))}
+        <p className="mt-2 font-semibold text-slate-100 truncate w-24">{participant.name}</p>
+        {isHost && <p className="text-xs text-amber-400">Host</p>}
     </div>
 );
 
 
-const ChatMessage: React.FC<{ 
-    message: LiveAudioRoomMessage; 
-}> = ({ message }) => {
-    const isJumbo = isJumboEmoji(message.text);
-    
-    return (
-        <div className="flex items-start gap-2 group max-w-[85%] animate-fade-in-fast">
-            <img src={message.sender.avatarUrl} alt={message.sender.name} className="w-8 h-8 rounded-full mt-1 flex-shrink-0" />
-            <div className="flex flex-col items-start">
-                <div className="flex items-baseline gap-2 px-1">
-                    <p className="text-sm font-bold text-slate-300 flex items-center">
-                        {message.sender.name}
-                        {message.isHost && <span className="ml-1.5" title="Host">👑</span>}
-                    </p>
-                </div>
-                <div className={`px-4 py-2 rounded-2xl max-w-xs relative transition-all duration-300 ${isJumbo ? 'bg-transparent' : 'bg-slate-800/80'}`}>
-                    <p className={`text-base break-words overflow-wrap-break-word ${isJumbo ? 'jumbo-emoji' : ''}`}>
-                        {message.text}
-                    </p>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-
-const LiveRoomScreen: React.FC<LiveRoomScreenProps> = ({ currentUser, roomId, onGoBack, onSetTtsMessage }) => {
+const LiveRoomScreen: React.FC<LiveRoomScreenProps> = ({ currentUser, roomId, onGoBack, onSetTtsMessage, onOpenProfile }) => {
     const [room, setRoom] = useState<LiveAudioRoom | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [isMuted, setIsMuted] = useState(true);
+    const [isSpeaking, setIsSpeaking] = useState(false);
     const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
-    
     const [messages, setMessages] = useState<LiveAudioRoomMessage[]>([]);
     const [newMessage, setNewMessage] = useState('');
+    const [isChatOpen, setIsChatOpen] = useState(false);
+
+    const agoraClient = useRef<IAgoraRTCClient | null>(null);
+    const localAudioTrack = useRef<IMicrophoneAudioTrack | null>(null);
+    const { language } = useSettings();
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    
-    const [showHeartAnimation, setShowHeartAnimation] = useState(false);
 
-    const onGoBackRef = useRef(onGoBack);
-    const onSetTtsMessageRef = useRef(onSetTtsMessage);
+    const isHost = room?.host.id === currentUser.id;
 
-    useEffect(() => {
-        onGoBackRef.current = onGoBack;
-        onSetTtsMessageRef.current = onSetTtsMessage;
-    });
-    
+    // Firestore listener for room data
     useEffect(() => {
         setIsLoading(true);
-        const unsubscribe = geminiService.listenToAudioRoom(roomId, (roomDetails) => {
+        const unsubscribe = geminiService.listenToAudioRoom(roomId, async (roomDetails) => {
             if (roomDetails) {
                 setRoom(roomDetails);
+                const amISpeaker = roomDetails.speakers.some(s => s.id === currentUser.id);
+                if (isSpeaking !== amISpeaker) { // Role changed
+                    setIsSpeaking(amISpeaker);
+                    if (amISpeaker) {
+                        await localAudioTrack.current?.setMuted(false);
+                        setIsMuted(false);
+                    } else {
+                        await localAudioTrack.current?.setMuted(true);
+                        setIsMuted(true);
+                    }
+                }
             } else {
-                onSetTtsMessageRef.current("The room has ended.");
-                onGoBackRef.current();
+                onGoBack(); // Room ended
             }
             setIsLoading(false);
         });
+        return unsubscribe;
+    }, [roomId, currentUser.id, onGoBack, isSpeaking]);
 
-        return () => unsubscribe();
-    }, [roomId]);
-
+    // Agora setup
     useEffect(() => {
-        const unsubscribe = geminiService.listenToLiveAudioRoomMessages(roomId, (newMessages) => {
-            setMessages(newMessages);
-        });
-        return () => unsubscribe();
-    }, [roomId]);
+        if (!AGORA_APP_ID) {
+            onSetTtsMessage("Agora App ID is not configured.");
+            onGoBack();
+            return;
+        }
 
+        const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+        agoraClient.current = client;
+
+        const handleUserPublished = async (user: IAgoraRTCRemoteUser, mediaType: 'audio' | 'video') => {
+            await client.subscribe(user, mediaType);
+            if (mediaType === 'audio') user.audioTrack?.play();
+        };
+
+        const handleVolumeIndicator = (volumes: any[]) => {
+            if (volumes.length === 0) { setActiveSpeakerId(null); return; };
+            const mainSpeaker = volumes.reduce((max, current) => current.level > max.level ? current : max);
+            setActiveSpeakerId(mainSpeaker.level > 5 ? mainSpeaker.uid.toString() : null);
+        };
+        
+        const joinAndPublish = async () => {
+            try {
+                client.on('user-published', handleUserPublished);
+                client.enableAudioVolumeIndicator();
+                client.on('volume-indicator', handleVolumeIndicator);
+                
+                const token = await geminiService.getAgoraToken(roomId, currentUser.id);
+                if (!token) throw new Error("Failed to get Agora token.");
+                await client.join(AGORA_APP_ID, roomId, token, currentUser.id);
+
+                localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack();
+                await client.publish([localAudioTrack.current]);
+
+                // Initial mute state determined by speaker status
+                const amISpeaker = room?.speakers.some(s => s.id === currentUser.id);
+                await localAudioTrack.current.setMuted(!amISpeaker);
+                setIsMuted(!amISpeaker);
+                setIsSpeaking(!!amISpeaker);
+
+            } catch (error: any) {
+                onSetTtsMessage(`Could not join the room: ${error.message || 'Unknown error'}`);
+                onGoBack();
+            }
+        };
+
+        geminiService.joinLiveAudioRoom(currentUser.id, roomId).then(joinAndPublish);
+
+        return () => {
+            client.off('user-published', handleUserPublished);
+            client.off('volume-indicator', handleVolumeIndicator);
+            localAudioTrack.current?.stop();
+            localAudioTrack.current?.close();
+            client.leave();
+            geminiService.leaveLiveAudioRoom(currentUser.id, roomId);
+        };
+    }, [roomId, currentUser.id, onGoBack, onSetTtsMessage, room?.speakers]);
+
+    // Chat listener
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
+        const unsubscribe = geminiService.listenToLiveAudioRoomMessages(roomId, setMessages);
+        return unsubscribe;
+    }, [roomId]);
+    
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages, isChatOpen]);
 
-    const handleLeave = () => onGoBack();
+    const toggleMute = () => {
+        if (isSpeaking) {
+            const muted = !isMuted;
+            localAudioTrack.current?.setMuted(muted);
+            setIsMuted(muted);
+        } else {
+            handleRaiseHand();
+        }
+    };
     
-    const isHost = room?.host.id === currentUser.id;
-    const isSpeaker = room?.speakers.some(s => s.id === currentUser.id) ?? false;
+    const handleLeave = () => {
+        if (isHost) {
+            geminiService.endLiveAudioRoom(currentUser.id, roomId);
+        }
+        onGoBack();
+    }
+
+    const handleRaiseHand = () => {
+        geminiService.raiseHandInAudioRoom(currentUser.id, roomId);
+        onSetTtsMessage("You've raised your hand to speak.");
+    };
+
+    const handleInviteToSpeak = (userId: string) => {
+        geminiService.inviteToSpeakInAudioRoom(currentUser.id, userId, roomId);
+    }
     
+    const handleMoveToAudience = (userId: string) => {
+        geminiService.moveToAudienceInAudioRoom(currentUser.id, userId, roomId);
+    }
+
     const handleSendMessage = async (e: React.FormEvent) => {
         e.preventDefault();
-        const trimmedMessage = newMessage.trim();
-        if (trimmedMessage === '' || !room) return;
-        
-        if (trimmedMessage === '❤️') {
-            setShowHeartAnimation(true);
-            setTimeout(() => setShowHeartAnimation(false), 3000);
-        }
-
-        try {
-            await geminiService.sendLiveAudioRoomMessage(roomId, currentUser, trimmedMessage, !!isHost, isSpeaker);
-            setNewMessage('');
-        } catch (error) {
-            console.error("Failed to send message:", error);
-            onSetTtsMessage("Could not send message.");
-        }
+        if (!newMessage.trim() || !room) return;
+        await geminiService.sendLiveAudioRoomMessage(roomId, currentUser, newMessage.trim(), isHost, isSpeaking);
+        setNewMessage('');
     };
 
     if (isLoading || !room) {
         return <div className="h-full w-full flex items-center justify-center bg-slate-900 text-white">Loading Room...</div>;
     }
-
-    const ChatInterface = () => (
-        <>
-            <main className="flex-grow overflow-y-auto p-4 space-y-4 no-scrollbar">
-                 <div className="bg-slate-800/50 rounded-lg p-3 text-xs text-slate-400">
-                    at the age of 18 or older. Rooms are monitored 24/7 to ensure compliance with our policies. Please follow the imo Community Guidelines to help build a safe and friendly community.
-                </div>
-                {messages.map(msg => (
-                    <ChatMessage key={msg.id} message={msg} />
-                ))}
-                <div ref={messagesEndRef} />
-            </main>
-            <footer className="flex-shrink-0 p-2 bg-black flex items-center gap-2 z-10">
-                <form onSubmit={handleSendMessage} className="relative flex-grow">
-                    <input
-                        type="text"
-                        value={newMessage}
-                        onChange={(e) => setNewMessage(e.target.value)}
-                        placeholder="Say Hi..."
-                        className="w-full bg-[#3a3b3c] border-none rounded-full py-2 pl-4 pr-10 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-lime-500 text-sm"
-                    />
-                    <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
-                         <Icon name="face-smile" className="w-5 h-5"/>
-                    </button>
-                </form>
-            </footer>
-        </>
-    );
+    
+    const hasRaisedHand = room.raisedHands.includes(currentUser.id);
 
     return (
-    <div className="h-full w-full flex flex-col bg-black text-white overflow-hidden">
-        {showHeartAnimation && <HeartAnimation />}
+        <div className="h-full w-full flex flex-col bg-slate-900 text-white">
+            <header className="flex-shrink-0 p-4 flex justify-between items-center bg-black/20">
+                <h1 className="text-xl font-bold truncate">{room.topic}</h1>
+                <button onClick={handleLeave} className="bg-red-600 hover:bg-red-500 font-bold py-2 px-4 rounded-lg">
+                    {isHost ? 'End Room' : 'Leave Quietly'}
+                </button>
+            </header>
 
-        <header className="flex-shrink-0 p-3 flex justify-between items-center bg-black/50 backdrop-blur-sm z-20">
-            <div className="flex items-center gap-2">
-                <img src="https://i.pravatar.cc/150?u=unmad" alt="Unmad" className="w-10 h-10 rounded-full" />
-                <div>
-                    <h1 className="font-bold text-white">Unmad</h1>
-                    <p className="text-xs text-slate-400">Members: 252</p>
+            <main className="flex-grow p-4 overflow-y-auto">
+                <h2 className="text-lg font-bold text-lime-400 mb-4">Speakers ({room.speakers.length})</h2>
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-4">
+                    {room.speakers.map(s => (
+                        <ParticipantCard key={s.id} participant={s} isHost={s.id === room.host.id} isMuted={s.id === currentUser.id && isMuted} isSpeaking={s.id === activeSpeakerId} onClick={() => isHost && s.id !== room.host.id && handleMoveToAudience(s.id)} />
+                    ))}
                 </div>
-            </div>
-            <div className="flex items-center gap-4">
-                <button onClick={handleLeave}><Icon name="close" className="w-6 h-6" /></button>
-            </div>
-        </header>
-        
-        <div className="flex-grow flex flex-col md:flex-row overflow-hidden">
-            {/* Main content area for users */}
-            <div className="flex-grow flex flex-col overflow-y-auto no-scrollbar">
-                {/* Mobile-only fixed speaker/listener grid */}
-                <div className="flex-shrink-0 p-4 space-y-4 md:hidden">
-                    <div>
-                        <h2 className="text-sm font-bold text-slate-400 mb-2">Speakers</h2>
-                        <div className="grid grid-cols-5 gap-2">
-                            {Array.from({ length: 10 }).map((_, i) => (
-                                <div key={`speaker-${i}`} className="w-16 h-16 bg-slate-700 rounded-full"></div>
-                            ))}
+
+                <h2 className="text-lg font-bold text-lime-400 mt-8 mb-4">Listeners ({room.listeners.length})</h2>
+                 <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-4">
+                    {room.listeners.map(l => (
+                         <ParticipantCard key={l.id} participant={l} isHost={false} isMuted={true} isSpeaking={false} onClick={() => onOpenProfile(l.username)} />
+                    ))}
+                </div>
+                
+                {isHost && room.raisedHands.length > 0 && (
+                    <>
+                        <h2 className="text-lg font-bold text-yellow-400 mt-8 mb-4">Raised Hands ({room.raisedHands.length})</h2>
+                        <div className="flex flex-wrap gap-4">
+                            {room.raisedHands.map(userId => {
+                                const user = [...room.listeners, ...room.speakers].find(u => u.id === userId);
+                                return user ? (
+                                    <div key={userId} className="bg-slate-800 p-2 rounded-lg flex items-center gap-2">
+                                        <img src={user.avatarUrl} alt={user.name} className="w-8 h-8 rounded-full"/>
+                                        <span className="font-semibold text-sm">{user.name}</span>
+                                        <button onClick={() => handleInviteToSpeak(userId)} className="bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-2 py-1 rounded">Invite</button>
+                                    </div>
+                                ) : null;
+                            })}
                         </div>
-                    </div>
-                     <div>
-                        <h2 className="text-sm font-bold text-slate-400 mb-2">Listeners</h2>
-                        <div className="grid grid-cols-8 gap-2">
-                            {Array.from({ length: 16 }).map((_, i) => (
-                                <div key={`listener-${i}`} className="w-10 h-10 bg-slate-700 rounded-full"></div>
-                            ))}
+                    </>
+                )}
+            </main>
+            
+            <div className={`absolute bottom-24 right-4 w-80 h-[60%] bg-slate-800/90 backdrop-blur-sm rounded-lg shadow-2xl flex flex-col transition-all duration-300 ${isChatOpen ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-10 pointer-events-none'}`}>
+                 <div className="flex-grow p-3 overflow-y-auto space-y-3">
+                    {messages.map(msg => (
+                        <div key={msg.id} className="flex items-start gap-2">
+                           <img src={msg.sender.avatarUrl} alt={msg.sender.name} className="w-8 h-8 rounded-full"/>
+                           <div>
+                               <p className="text-xs"><span className="font-bold text-lime-300">{msg.sender.name}</span> {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                               <p className="text-sm bg-slate-700/50 px-2 py-1 rounded-md inline-block">{msg.text}</p>
+                           </div>
                         </div>
-                    </div>
-                </div>
-
-                {/* Desktop user grid & Mobile chat log */}
-                <div className="flex-grow overflow-y-auto no-scrollbar">
-                    {/* Desktop: Show all users in a grid */}
-                    <div className="hidden md:flex flex-wrap gap-x-2 gap-y-4 justify-center p-4">
-                        {room.speakers.map(speaker => (
-                            <Avatar key={speaker.id} user={speaker} isHost={speaker.id === room.host.id} isSpeaking={speaker.id === activeSpeakerId} />
-                        ))}
-                        {room.listeners.map(listener => (
-                            <Avatar key={listener.id} user={listener} />
-                        ))}
-                    </div>
-                     {/* Mobile: Show chat messages here */}
-                    <div className="md:hidden flex flex-col h-full">
-                        <ChatInterface />
-                    </div>
-                </div>
+                    ))}
+                    <div ref={messagesEndRef} />
+                 </div>
+                 <form onSubmit={handleSendMessage} className="p-2 border-t border-slate-700 flex-shrink-0 flex gap-2">
+                     <input type="text" value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder="Send a message..." className="flex-grow bg-slate-700 rounded-full px-3 py-1.5 text-sm"/>
+                     <button type="submit" className="bg-lime-600 text-black p-2 rounded-full"><Icon name="paper-airplane" className="w-4 h-4"/></button>
+                 </form>
             </div>
-
-             {/* Desktop-only chat sidebar */}
-            <aside className="w-96 flex-shrink-0 bg-slate-900/50 border-l border-slate-700 flex-col hidden md:flex">
-                <ChatInterface />
-            </aside>
+            
+            <footer className="flex-shrink-0 p-4 bg-black/20 flex justify-center items-center h-24 gap-6">
+                 <button onClick={toggleMute} className={`p-4 rounded-full transition-colors ${isMuted ? 'bg-slate-600' : 'bg-green-600'} ${hasRaisedHand ? 'animate-pulse' : ''}`}>
+                    <Icon name={isMuted ? (isSpeaking ? 'microphone-slash' : 'mic') : 'mic'} className="w-8 h-8" />
+                </button>
+                 <button onClick={() => setIsChatOpen(p => !p)} className="p-4 rounded-full bg-slate-600 hover:bg-slate-500">
+                    <Icon name="message" className="w-8 h-8" />
+                </button>
+            </footer>
         </div>
-    </div>
     );
 };
 
